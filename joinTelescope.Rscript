@@ -1,0 +1,105 @@
+#!/usr/bin/env Rscript
+
+##############Imported from tximport
+
+readAlevin <- function(files) {
+  dir <- sub("/alevin$","",dirname(files))
+
+  # a little code to catch this case:
+  # we can't import infReps in Alevin >= 0.14 in tximport v1.12
+  if (!requireNamespace("jsonlite", quietly=TRUE)) {
+    stop("importing Alevin requires package `jsonlite`")
+  }
+  jsonPath <- file.path(dir, "cmd_info.json")
+  cmd_info <- jsonlite::fromJSON(jsonPath)
+  if ("numCellBootstraps" %in% names(cmd_info))
+    stop("tximport 1.12 cannot import bootstraps from Alevin version >= 0.14, use newer tximport")
+
+  barcode.file <- file.path(dir, "alevin/quants_mat_rows.txt")
+  gene.file <- file.path(dir, "alevin/quants_mat_cols.txt")
+  matrix.file <- file.path(dir, "alevin/quants_mat.gz")
+  for (f in c(barcode.file, gene.file, matrix.file)) {
+    if (!file.exists(f)) {
+      stop("expecting 'files' to point to 'quants_mat.gz' file in a directory 'alevin'
+  also containing 'quants_mat_rows.txt' and 'quant_mat_cols.txt'.
+  please re-run alevin preserving output structure")
+    }
+  }
+  cell.names <- readLines(barcode.file)
+  gene.names <- readLines(gene.file)
+  num.cells <- length(cell.names)
+  num.genes <- length(gene.names)
+
+  mat <- matrix(0, nrow=num.genes, ncol=num.cells, dimnames=list(gene.names, cell.names))
+  con <- gzcon(file(matrix.file, "rb"))
+
+  # Salmon v0.14 specific support
+  num.bitvecs <- ceiling(num.genes/8)
+  for (j in seq_len(num.cells)) {
+    # read the bit vector
+    bit.vec <- readBin(con, integer(), size=1, signed=FALSE, endian="little", n=num.bitvecs)
+    bits <- sapply(bit.vec, intToBits)
+    # 8 to 1, because intToBits gives the least sig bit first
+    bit.ints <- apply(bits[8:1,], 2, as.integer)
+    num.exp.genes <- sum(bit.ints == 1)
+    # read in the expression of expressed genes
+    counts <- readBin(con, double(), size=4, endian="little", n=num.exp.genes)
+    locs <- head(as.vector(bit.ints), num.genes)
+    mat[locs == 1,j] <- counts
+  }
+  close(con)
+
+  mat
+}
+
+read_multiple<-function(x, dir,name, col, skip,noCoun){
+  lapply(lfile, function(x) {
+    z <- read.delim(file.path(dir,x),header=T,skip=skip)[,col]
+    z <- z[which(z[,2]>0 & ! z[,1] %in% noCoun ),]
+    #colnames(z)<-c(name,paste0(strsplit(x,split="/")[[1]][1],'_',strsplit(x,split="/")[[1]][2]))    #You need to check this because in my case I have my outputs saved in a folder named after the sample. Example :SRR497707/XXXYYY- -telescope_report.tsv but you need to check this
+    colnames(z)<-c(name,strsplit(x,split="-")[[1]][1])
+    z
+  })}   #this function is for reading multiple files
+
+
+
+
+args<-commandArgs(trailingOnly=T)
+
+
+
+samp<-args[1] #just the name of the output
+
+
+lfile<-list.files(path=paste0("./Telescope/HERV/",samp),pattern='*telescope_report.tsv') #find all files with that name
+datatemp <- read_multiple(lfile, dir=paste0("./Telescope/HERV/",samp),name="Gene", col=c(1,4),skip=1, noCoun=c('__no_feature')) # Read the file and extract the column 3 is for final_count and 4 the final_conf
+datos<-Reduce(function(x,y) {merge(x,y, by="Gene", all=T)}, datatemp) #merge all tables into a single one
+datos[is.na(datos)]<-0
+ft<-paste0(samp,"_HERV_table.tsv")
+file1<-file.path("./Telescope/HERV",ft)
+write.table(datos, file=file1, quote=F, sep=',', row.names=F)
+
+lfile<-list.files(path=paste0("./Telescope/L1/",samp),pattern='*telescope_report.tsv') #find all files with that name
+datatemp <- read_multiple(lfile, dir=paste0("./Telescope/L1/",samp),name="Gene", col=c(1,4),skip=1, noCoun=c('__no_feature')) # Read the file and extract the column 3 is for final_count and 4 the final_conf
+datos<-Reduce(function(x,y) {merge(x,y, by="Gene", all=T)}, datatemp) #merge all tables into a single one
+datos[is.na(datos)]<-0
+ft<-paste0(samp,"_L1_table.tsv")
+file1<-file.path("./Telescope/L1",ft)
+write.table(datos, file=file1, quote=F, sep=',', row.names=F)
+
+
+dir<-paste0("Alevin/",samp)
+lfiles<-list.files(path=dir,pattern='quants_mat.gz', recursive=T)
+lfiles<-sapply(lfiles,function(x){file.path(dir,x)})
+
+txi<-lapply(lfiles,readAlevin)
+
+gennam<-rownames(txi[[1]])
+ngen<-length(gennam)
+cellnam<-do.call(c,sapply(txi,colnames))
+ncell<-length(cellnam)
+
+bgm<-matrix(0, nrow=ngen, ncol=ncell, dimnames=list(gennam, cellnam))
+bgm<-do.call(cbind, txi)
+
+write.table(bgm,file=file.path(dir,"countmatrix.csv"), sep=",",quote=F)
